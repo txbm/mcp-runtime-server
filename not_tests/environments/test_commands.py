@@ -6,9 +6,7 @@ from pathlib import Path
 
 from mcp_runtime_server.environments.environment import create_environment
 from mcp_runtime_server.environments.commands import (
-    run_command,
     run_install,
-    clone_repository,
 )
 
 
@@ -18,7 +16,7 @@ async def test_run_install_node():
     env = await create_environment("https://github.com/txbm/mcp-node-repo-fixture")
 
     await run_install(env)
-    assert (env.work_dir / "node_modules").exists()
+    assert (env.sandbox.work_dir / "node_modules").exists()
 
 
 @pytest.mark.asyncio
@@ -27,9 +25,9 @@ async def test_run_install_python():
     env = await create_environment("https://github.com/txbm/mcp-python-repo-fixture")
 
     await run_install(env)
-    assert (env.work_dir / ".venv").exists()
-    assert (env.work_dir / ".venv" / "bin" / "python").exists() or (
-        env.work_dir / ".venv" / "Scripts" / "python.exe"
+    assert (env.sandbox.work_dir / ".venv").exists()
+    assert (env.sandbox.work_dir / ".venv" / "bin" / "python").exists() or (
+        env.sandbox.work_dir / ".venv" / "Scripts" / "python.exe"
     ).exists()
 
 
@@ -39,8 +37,8 @@ async def test_github_clone():
     env = await create_environment("https://github.com/txbm/mcp-runtime-server")
 
     # Verify clone success
-    assert (env.work_dir / ".git").exists()
-    assert (env.work_dir / "pyproject.toml").exists()
+    assert (env.sandbox.work_dir / ".git").exists()
+    assert (env.sandbox.work_dir / "pyproject.toml").exists()
 
 
 @pytest.mark.asyncio

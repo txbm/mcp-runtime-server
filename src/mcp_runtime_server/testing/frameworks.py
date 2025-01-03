@@ -6,7 +6,7 @@ from enum import Enum
 from pathlib import Path
 from typing import List, Dict, Any, Set
 
-from mcp_runtime_server.environments.commands import run_command
+from mcp_runtime_server.environments.sandbox import run_sandboxed_command
 from mcp_runtime_server.types import Environment
 from mcp_runtime_server.testing.results import parse_pytest_json
 from mcp_runtime_server.logging import get_logger
@@ -16,7 +16,6 @@ logger = get_logger(__name__)
 
 class TestFramework(str, Enum):
     PYTEST = "pytest"
-    UNITTEST = "unittest"  # Added support for unittest
 
 
 def _has_test_files(directory: Path, pattern: str) -> bool:
@@ -94,8 +93,6 @@ def _check_file_imports(file_path: Path, import_names: List[str]) -> bool:
 def _find_test_dirs(project_dir: Path) -> Set[Path]:
     """Find all potential test directories in the project."""
     test_dirs = set()
-
-    # Common test directory names
     test_dir_names = ["tests", "test", "testing", "unit_tests", "integration_tests"]
 
     logger.debug(
@@ -106,11 +103,9 @@ def _find_test_dirs(project_dir: Path) -> Set[Path]:
         }
     )
 
-    # Search for test directories
     for root, dirs, _ in os.walk(project_dir):
         root_path = Path(root)
 
-        # Add directories that match common test directory names
         matched_dirs = [d for d in dirs if d.lower() in test_dir_names]
         if matched_dirs:
             logger.debug(
@@ -122,7 +117,6 @@ def _find_test_dirs(project_dir: Path) -> Set[Path]:
             )
             test_dirs.update(root_path / d for d in matched_dirs)
 
-        # Add directories containing test files
         test_file_dirs = [d for d in dirs if _has_test_files(root_path / d, ".py")]
         if test_file_dirs:
             logger.debug(
@@ -144,23 +138,14 @@ def _find_test_dirs(project_dir: Path) -> Set[Path]:
     return test_dirs
 
 
-def detect_frameworks(project_dir: str) -> List[TestFramework]:
-    """Detect test frameworks in a project directory.
-
-    Detection methods:
-    1. Check for framework-specific configuration files
-    2. Scan for test files and analyze imports
-    3. Check project configuration files
-    4. Look for framework-specific patterns in test files
-    """
-    path = Path(project_dir)
+def detect_frameworks(env: Environment) -> List[TestFramework]:
+    """Detect test frameworks in a project directory."""
+    path = env.sandbox.work_dir
     frameworks = set()
 
     logger.info({"event": "framework_detection_start", "project_dir": str(path)})
 
-    # Find all potential test directories
     test_dirs = _find_test_dirs(path)
-
     if not test_dirs:
         logger.warning({"event": "no_test_directories_found", "project_dir": str(path)})
         return list(frameworks)
@@ -168,12 +153,11 @@ def detect_frameworks(project_dir: str) -> List[TestFramework]:
     for test_dir in test_dirs:
         logger.info({"event": "test_directory_found", "path": str(test_dir)})
 
-        # Check for pytest indicators
         pytest_indicators = [
-            test_dir / "conftest.py",  # Conftest file
-            path / "pytest.ini",  # Pytest config
-            path / "setup.cfg",  # Setup.cfg might contain pytest config
-            path / "tox.ini",  # Tox config might contain pytest config
+            test_dir / "conftest.py",
+            path / "pytest.ini",
+            path / "setup.cfg",
+            path / "tox.ini",
         ]
 
         existing_indicators = [p for p in pytest_indicators if p.exists()]
@@ -186,7 +170,6 @@ def detect_frameworks(project_dir: str) -> List[TestFramework]:
                 }
             )
 
-        # Scan Python files in test directory for framework imports
         for root, _, files in os.walk(test_dir):
             logger.debug(
                 {
@@ -203,21 +186,13 @@ def detect_frameworks(project_dir: str) -> List[TestFramework]:
                 file_path = Path(root) / file
                 logger.debug({"event": "checking_python_file", "file": str(file_path)})
 
-                # Check pytest imports
                 if _check_file_imports(file_path, ["pytest"]):
                     frameworks.add(TestFramework.PYTEST)
                     logger.info(
                         {"event": "pytest_import_found", "file": str(file_path)}
                     )
 
-                # Check unittest imports
-                if _check_file_imports(file_path, ["unittest"]):
-                    frameworks.add(TestFramework.UNITTEST)
-                    logger.info(
-                        {"event": "unittest_import_found", "file": str(file_path)}
-                    )
-
-    # Check pyproject.toml for test dependencies
+    # Check pyproject.toml
     pyproject_path = path / "pyproject.toml"
     if pyproject_path.exists():
         try:
@@ -241,51 +216,6 @@ def detect_frameworks(project_dir: str) -> List[TestFramework]:
         except Exception as e:
             logger.warning({"event": "pyproject_toml_read_error", "error": str(e)})
 
-    if not frameworks:
-        # If no specific framework is detected but test files exist,
-        # default to unittest if there are test case classes
-        logger.debug(
-            {
-                "event": "no_frameworks_detected_checking_patterns",
-                "test_directories": [str(d) for d in test_dirs],
-            }
-        )
-        for test_dir in test_dirs:
-            for root, _, files in os.walk(test_dir):
-                for file in files:
-                    if not file.startswith("test_") or not file.endswith(".py"):
-                        continue
-
-                    file_path = Path(root) / file
-                    try:
-                        with open(file_path, "r", encoding="utf-8") as f:
-                            content = f.read()
-                            logger.debug(
-                                {
-                                    "event": "checking_unittest_patterns",
-                                    "file": str(file_path),
-                                    "content_preview": content[:200],
-                                }
-                            )
-                            if "class Test" in content and "TestCase" in content:
-                                frameworks.add(TestFramework.UNITTEST)
-                                logger.info(
-                                    {
-                                        "event": "unittest_pattern_found",
-                                        "file": str(file_path),
-                                    }
-                                )
-                    except Exception as e:
-                        logger.error(
-                            {
-                                "event": "unittest_pattern_check_error",
-                                "file": str(file_path),
-                                "error": str(e),
-                            }
-                        )
-                        continue
-
-    # Log detection summary
     logger.info(
         {
             "event": "framework_detection_complete",
@@ -297,102 +227,41 @@ def detect_frameworks(project_dir: str) -> List[TestFramework]:
     return list(frameworks)
 
 
-async def run_pytest(env: Environment) -> Dict[str, Any]:
+async def run_pytest(env: Environment) -> dict[str, Any]:
     """Run pytest in the environment."""
-    result = {"framework": TestFramework.PYTEST.value}
+    result: dict[str, Any] = {"framework": TestFramework.PYTEST.value}
 
-    try:
-        pytest_path = env.sandbox.bin_dir / "pytest"  # Fixed path reference
-        if not pytest_path.exists():
-            pytest_path = env.sandbox.bin_dir / "pytest.exe"  # Fixed path reference
+    pytest_cmd = "pytest -vv --no-header --json-report"
 
-        if not pytest_path.exists():
-            raise RuntimeError("pytest not found in environment")
+    test_dirs = _find_test_dirs(env.sandbox.work_dir)
+    if not test_dirs:
+        raise RuntimeError("No test directories found")
 
-        # Search for test directories
-        test_dirs = _find_test_dirs(env.work_dir)
-        if not test_dirs:
-            raise RuntimeError("No test directories found")
+    all_results = []
 
-        # Run pytest for each test directory
-        all_results = []
-        for test_dir in test_dirs:
-            process = await run_command(
-                f"{pytest_path} -vv --no-header --json-report --json-report-file=- {test_dir} 2>/dev/stderr",
-                str(env.work_dir),
-                env.env_vars,
-            )
-            stdout, stderr = await process.communicate()
+    for test_dir in test_dirs:
+        process = await run_sandboxed_command(
+            env.sandbox,
+            f"{pytest_cmd} {test_dir}",
+            env.env_vars,
+        )
+        stdout, stderr = await process.communicate()
 
-            try:
-                report = json.loads(stderr)
-                summary = parse_pytest_json(report)
-                all_results.append(summary)
-            except json.JSONDecodeError:
-                all_results.append(
-                    {
-                        "success": process.returncode == 0,
-                        "error": f"Failed to parse test output for {test_dir}",
-                        "stdout": stdout.decode() if stdout else "",
-                        "stderr": stderr.decode() if stderr else "",
-                    }
-                )
-
-        # Combine results
-        if all_results:
-            result.update(
-                {
-                    "success": all(r.get("success", False) for r in all_results),
-                    "test_dirs": [str(d) for d in test_dirs],
-                    "results": all_results,
-                }
-            )
-        else:
-            result.update({"success": False, "error": "No test results generated"})
-
-    except Exception as e:
-        result.update({"success": False, "error": str(e)})
-
-    return result
-
-
-async def run_unittest(env: Environment) -> Dict[str, Any]:
-    """Run unittest in the environment."""
-    result = {"framework": TestFramework.UNITTEST.value}
-
-    try:
-        python_path = env.sandbox.bin_dir / "python"  # Fixed path reference
-        if not python_path.exists():
-            python_path = env.sandbox.bin_dir / "python.exe"  # Fixed path reference
-
-        if not python_path.exists():
-            raise RuntimeError("python not found in environment")
-
-        # Search for test directories
-        test_dirs = _find_test_dirs(env.work_dir)
-        if not test_dirs:
-            raise RuntimeError("No test directories found")
-
-        # Run unittest discovery for each test directory
-        all_results = []
-        for test_dir in test_dirs:
-            process = await run_command(
-                f"{python_path} -m unittest discover -v {test_dir}",
-                str(env.work_dir),
-                env.env_vars,
-            )
-            stdout, stderr = await process.communicate()
-
+        try:
+            report = json.loads(stdout)
+            summary = parse_pytest_json(report)
+            all_results.append(summary)
+        except json.JSONDecodeError:
             all_results.append(
                 {
                     "success": process.returncode == 0,
-                    "test_dir": str(test_dir),
+                    "error": f"Failed to parse test output for {test_dir}",
                     "stdout": stdout.decode() if stdout else "",
                     "stderr": stderr.decode() if stderr else "",
                 }
             )
 
-        # Combine results
+    if all_results:
         result.update(
             {
                 "success": all(r.get("success", False) for r in all_results),
@@ -400,9 +269,8 @@ async def run_unittest(env: Environment) -> Dict[str, Any]:
                 "results": all_results,
             }
         )
-
-    except Exception as e:
-        result.update({"success": False, "error": str(e)})
+    else:
+        result.update({"success": False, "error": "No test results generated"})
 
     return result
 
@@ -415,14 +283,12 @@ async def run_framework_tests(
         {
             "event": "framework_test_start",
             "framework": framework.value,
-            "working_dir": str(env.work_dir),
+            "working_dir": str(env.sandbox.work_dir),
         }
     )
 
     if framework == TestFramework.PYTEST:
         result = await run_pytest(env)
-    elif framework == TestFramework.UNITTEST:
-        result = await run_unittest(env)
     else:
         error = f"Unsupported framework: {framework}"
         logger.error({"event": "framework_test_error", "error": error})

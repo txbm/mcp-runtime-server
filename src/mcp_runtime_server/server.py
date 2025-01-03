@@ -11,8 +11,8 @@ from mcp.server.lowlevel import Server
 from mcp.server.models import InitializationOptions
 from mcp.server import stdio
 
+from mcp_runtime_server.types import Environment
 from mcp_runtime_server.environments.environment import (
-    Environment,
     create_environment,
     cleanup_environment,
 )

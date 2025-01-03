@@ -1,1 +1,0 @@
-"""Binary management functionality."""

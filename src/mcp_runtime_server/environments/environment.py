@@ -1,72 +1,71 @@
-"""Environment management and lifecycle."""
+"""Environment lifecycle management."""
 
-import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
+import shutil
+from datetime import datetime, timezone
 from typing import Optional
+
 from fuuid import b58_fuuid
 
-from mcp_runtime_server.types import Environment
-from mcp_runtime_server.environments.runtime import detect_runtime, setup_runtime_env
-from mcp_runtime_server.environments.sandbox import create_sandbox, cleanup_sandbox
-from mcp_runtime_server.environments.commands import clone_repository
+from mcp_runtime_server.types import Environment, Sandbox
+from mcp_runtime_server.runtimes.runtime import detect_runtime, install_runtime
+from mcp_runtime_server.sandboxes.sandbox import create_sandbox, cleanup_sandbox
+from mcp_runtime_server.sandboxes.git import clone_github_repository
 from mcp_runtime_server.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-async def create_environment(
-    github_url: str, branch: Optional[str] = None
+async def create_environment_from_github(
+    staging: Sandbox, github_url: str, branch: Optional[str] = None
 ) -> Environment:
-    """Create new sandboxed environment."""
-    try:
-        env_id = b58_fuuid()
 
-        # Create temp directory that will be automatically cleaned up
-        temp_dir = tempfile.TemporaryDirectory(prefix=f"mcp-{env_id}-")
-        sandbox = create_sandbox(Path(temp_dir.name))
-        env_vars = sandbox.env_vars
+    repo = await clone_github_repository(staging, github_url, branch)
+    env = await create_environment(repo)
 
-        # Clone and detect runtime
-        await clone_repository(github_url, sandbox.work_dir, branch, env_vars)
-        runtime = detect_runtime(sandbox.work_dir)
+    return env
 
-        # Setup runtime environment
-        env_vars = setup_runtime_env(
-            env_vars, runtime=runtime, work_dir=sandbox.work_dir
-        )
 
-        return Environment(
-            id=env_id,
-            runtime=runtime,
-            sandbox=sandbox,
-            work_dir=sandbox.work_dir,
-            created_at=datetime.now(timezone.utc),
-            env_vars=env_vars,
-            tempdir=temp_dir,  # Store reference to keep directory alive
-        )
+async def create_environment(path: Path) -> Environment:
+    """Create new environment from a filesystem path."""
 
-    except Exception as e:
-        logger.error({"event": "environment_creation_failed", "error": str(e)})
-        if "temp_dir" in locals():
-            temp_dir.cleanup()
-        raise RuntimeError(f"Failed to create environment: {e}")
+    env_id = b58_fuuid()
+    logger.info(
+        {
+            "event": "creating_environment",
+            "env_id": env_id,
+            "path": path,
+        }
+    )
+    sandbox = await create_sandbox(f"mcp-{env_id}-")
+    shutil.copytree(path, sandbox.work_dir, dirs_exist_ok=True)
+
+    runtime_config = detect_runtime(sandbox)
+    runtime_bin, pkg_bin, test_bin = await install_runtime(sandbox, runtime_config)
+
+    env = Environment(
+        id=env_id,
+        runtime_config=runtime_config,
+        sandbox=sandbox,
+        created_at=datetime.now(timezone.utc),
+        runtime_bin=runtime_bin,
+        pkg_bin=pkg_bin,
+        test_bin=test_bin,
+    )
+
+    logger.info(
+        {
+            "event": "environment_created",
+            "env_id": env_id,
+            "runtime": runtime_config.name.value,
+            "work_dir": sandbox.work_dir,
+        }
+    )
+
+    return env
 
 
 def cleanup_environment(env: Environment) -> None:
-    """Clean up environment.
+    """Clean up environment and its resources."""
 
-    This performs an explicit cleanup of the sandbox environment and its resources.
-    Even if this is not called, the environment will be cleaned up when the Environment
-    object is destroyed via the TemporaryDirectory.
-    """
-    try:
-        # First try sandbox cleanup for proper resource cleanup
-        cleanup_sandbox(env.sandbox)
-        # Then cleanup temporary directory
-        env.tempdir.cleanup()
-
-    except Exception as e:
-        logger.error({"event": "environment_cleanup_failed", "error": str(e)})
-        # Re-raise so caller knows about failure
-        raise RuntimeError(f"Failed to cleanup environment: {e}")
+    cleanup_sandbox(env.sandbox)
